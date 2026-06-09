@@ -24,7 +24,19 @@ echo "==> building images (base perf-bench + perf-bench-host)"
 docker build -t perf-bench      -f Dockerfile      .
 docker build -t perf-bench-host -f Dockerfile.host .
 
-echo "==> running host baseline: ${CPUS} vCPU / ${MEM_MB} MiB, duration=${DURATION}s"
+echo "==> running host baseline: ${CPUS} vCPU / ${MEM_MB} MiB, duration=${DURATION}s, cases=${*:-<all>}"
+
+# perf tracing of stress-ng (PERF_TRACE=1) needs perf permissions inside the
+# container: grant CAP_SYS_ADMIN + CAP_PERFMON. If perf still fails on a locked-down
+# host, swap these for --privileged. Note: an L1 cloud VM often has no hardware PMU,
+# so sampling defaults to the software event cpu-clock (set in common.py) and works
+# regardless; perf-stat hardware counters may show "<not supported>".
+PERF_OPTS=()
+if [ "${PERF_TRACE:-0}" != "0" ]; then
+  echo "    perf tracing ON (mode=${PERF_MODE:-both} event=${PERF_EVENT:-cpu-clock}); adding --cap-add SYS_ADMIN,PERFMON"
+  PERF_OPTS=(--cap-add SYS_ADMIN --cap-add PERFMON)
+fi
+
 # --cpuset-cpus pins to N cores so nproc==N (matches a 2-vCPU sandbox; --cpus
 #   quota would leave nproc at the host count and skew A4/B10 scaling).
 # --memory + equal --memory-swap caps RAM and disables swap.
@@ -35,11 +47,14 @@ echo "==> running host baseline: ${CPUS} vCPU / ${MEM_MB} MiB, duration=${DURATI
 docker run --rm \
   --cpuset-cpus="0-$((CPUS - 1))" \
   --memory="${MEM_MB}m" --memory-swap="${MEM_MB}m" \
+  "${PERF_OPTS[@]}" \
   --tmpfs /mnt/tmpfsbench:rw,size=1g \
   -v /tmp:/tmp \
   -e DURATION="${DURATION}" \
   -e SANDBOX_CPUS="${CPUS}" -e SANDBOX_MEM_MB="${MEM_MB}" \
-  perf-bench-host
+  -e PERF_TRACE -e PERF_MODE -e PERF_EVENT -e PERF_FREQ -e PERF_MATCH -e PERF_REPORT_LINES \
+  perf-bench-host \
+  python3 /test/runner/run_all.py "$@"
 
 echo "==> done. latest batch:"
 ls -1dt /tmp/result/*/ 2>/dev/null | head -1

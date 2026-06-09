@@ -58,6 +58,43 @@ docker run --rm --cpuset-cpus=0-1 --memory=2048m --memory-swap=2048m \
 
 ---
 
+## perf 性能/热点分析(PERF_TRACE)
+
+设 `PERF_TRACE=1` 后,**匹配 `PERF_MATCH`(默认 `stress-ng`)的命令会在 `perf` 下跑**,产出写进该用例结果文件:
+
+- `=== perf stat ===`:计数器摘要(task-clock、context-switches、cpu-migrations、page-faults;IPC/cache 等**硬件计数器**在无 vPMU 时显示 `<not supported>`)。
+- `=== perf report (hotspots) ===`:`perf record` 采样得到的**符号级热点 top 表**。
+
+**沙箱与主机两种模式都支持**,用法与平时一致,只多加 `PERF_TRACE=1`:
+
+```bash
+# 沙箱模式(perf 跑在 guest 内)
+PERF_TRACE=1 DURATION=10 python3 cases/case_B6.py
+PERF_TRACE=1 python3 run_all.py B6 B7 A2
+
+# 主机模式(perf 跑在容器内;run-host.sh 会自动加 --cap-add SYS_ADMIN,PERFMON)
+PERF_TRACE=1 DURATION=10 bash ../run-host.sh
+
+# 主机模式直接 docker run(需手动加 caps + 透传 PERF_TRACE)
+docker run --rm --cpuset-cpus=0-1 --memory=2048m --memory-swap=2048m \
+  --cap-add SYS_ADMIN --cap-add PERFMON \
+  -v /tmp:/tmp -v /home/shansi/log:/home/shansi/log -e RESULTS_ROOT=/home/shansi/log \
+  -e PERF_TRACE=1 -e DURATION=10 \
+  perf-bench-host python3 /test/runner/run_all.py B6
+```
+
+可调:`PERF_MODE=stat`(只要计数器,开销最小)/ `PERF_MODE=record`(只要热点);`PERF_MATCH` 改匹配范围;`PERF_EVENT` 换采样事件。
+
+**三点注意:**
+
+1. **无硬件 PMU**:Firecracker guest 和多数云 L1 VM 不暴露 vPMU,所以采样默认用软件事件 `cpu-clock`(已能出热点);`perf stat` 的 `cycles`/`instructions`/`cache-misses` 等会是 `<not supported>`——这本身就是"无 vPMU"的证据。
+2. **符号**:发行版 `stress-ng` 被 strip,用户态热点多显示 `[unknown]`;**内核侧符号可解析**(perf 以 root 跑并放宽 `kptr_restrict`),而 stress-ng 的开销大头本就在内核(syscall/陷出),所以内核热点正是关注点。
+3. **计时被污染 / 跑两趟 / root**:开关打开时,被包裹用例的 `[run]` 段是 **perf 下的运行**,其 `time`/health 计时被采样开销扰动(已替换掉干净计时);`both` 模式一条命令会跑两趟(stat + record),`repeats>1` 会成倍放大耗时;沙箱模式下该命令**以 root 执行**(绕过 `perf_event_paranoid`)。需要干净基线时,另跑一批**不设** `PERF_TRACE` 的即可。
+
+> 这与 `tests/perf/hostobs/observe.py` 的 `perf kvm stat`(在 L1 观测 Firecracker 进程的 VM-exit)是互补的两层:这里看的是 **workload(stress-ng)自身**的微架构与热点,hostobs 看的是**虚拟化陷出**。
+
+---
+
 ## 布局
 
 ```
@@ -218,6 +255,11 @@ docker stop perf-b11-17                            # 停止
 | `BATCH_DIR` | _(自动)_ | 批次目录;`run_all.py` 注入,单用例独立运行时自建 |
 | `STREAM` | `1` | 实时流式输出到终端;`0` 静默 |
 | `SANDBOX_HOOK` | _(未设)_ | 每个沙箱启动后、跑用例前,**以 root 执行一次**的 shell 命令(环境调优,见下) |
+| `PERF_TRACE` | `0` | 设 `1` 时用 **perf 跟踪 stress-ng**(perf stat + 热点),见「perf 性能/热点分析」 |
+| `PERF_MATCH` | `stress-ng` | 决定哪些命令被 perf 包裹的正则 |
+| `PERF_MODE` | `both` | `both` / `stat` / `record` |
+| `PERF_EVENT` | `cpu-clock` | record 采样事件(软件事件,无 vPMU 也能出热点) |
+| `PERF_FREQ` / `PERF_REPORT_LINES` | `999` / `40` | 采样频率 / 热点表行数上限 |
 | `SANDBOX_CPUS` / `SANDBOX_MEM_MB` | `2` / `2048` | `run-host.sh` 的容器限额 |
 | `IPERF_SERVER` / `NETPERF_SERVER` / `WRK_TARGET` | _(未设)_ | 设了才跑对应网络用例(A13/A14/A15) |
 

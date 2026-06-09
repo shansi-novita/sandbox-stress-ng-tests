@@ -18,6 +18,12 @@ Config via environment variables:
   STREAM            1 (default) streams live command output to the terminal; 0 to silence
   BACKEND           e2b (default) runs each case in a sandbox; local runs commands
                     directly via subprocess (host baseline inside a Docker container)
+  PERF_TRACE        1 traces matched (stress-ng) commands UNDER perf: perf stat +
+                    perf record→report hotspots, in place of the timing wrapper
+  PERF_MATCH        regex selecting which commands perf wraps (default: stress-ng)
+  PERF_MODE         both (default) | stat | record
+  PERF_EVENT        record sampling event (default cpu-clock; works without a vPMU)
+  PERF_FREQ / PERF_REPORT_LINES   record frequency (999) / hotspot table cap (40)
 """
 
 import os
@@ -202,10 +208,12 @@ def perf_wrapper(cmd, pin_core):
             "-- bash $__B.sh >/dev/null 2>&1; __RC2=$?")
         if not do_stat:  # record's rc is the only signal of the benchmark result
             lines.append("__RC=$__RC2")
+        # Gate on the data file existing: a pipeline's exit is head's, so a plain
+        # `perf report | head || echo` would hide a failed/empty record.
         lines.append(
-            f'"$__P" report --stdio --percent-limit 1 -i $__B.data 2>/dev/null '
-            f"| head -n {PERF_REPORT_LINES} "
-            '|| echo "(perf report unavailable — check perf permissions / event support)"')
+            f'if [ -s $__B.data ]; then "$__P" report --stdio --percent-limit 1 '
+            f'-i $__B.data 2>/dev/null | head -n {PERF_REPORT_LINES}; '
+            'else echo "(no perf samples — check perf permissions / event support / no PMU)"; fi')
     lines.append("rm -f $__B.sh $__B.stat $__B.data 2>/dev/null")
     lines.append("exit $__RC")
     return "\n".join(lines) + "\n"
@@ -570,8 +578,11 @@ def run_case(case_id, name, commands, memory=False, requires_env=None,
     pin_core = None if not pin or not PIN_CORE else PIN_CORE
 
     # Many benchmarks (lmbench lat_*, 7z, openssl speed) ignore DURATION and run
-    # to their own completion, so keep a 5-min floor regardless of DURATION.
-    cmd_timeout = cmd_timeout or max(DURATION + 90, 300)
+    # to their own completion, so keep a 5-min floor regardless of DURATION. When
+    # PERF_TRACE is on, a matched command runs twice (perf stat + perf record), so
+    # budget ~2x DURATION before falling back to the floor.
+    if cmd_timeout is None:
+        cmd_timeout = max(2 * DURATION + 120, 300) if PERF_TRACE else max(DURATION + 90, 300)
     # Sandbox lifetime: generous headroom over every command we will run.
     n_runs = 2 if memory else 1
     timeout = max(300, (cmd_timeout + 15) * len(commands) * n_runs * repeats + 120)
