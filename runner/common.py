@@ -382,7 +382,8 @@ def run_cmd_local(cmd, cmd_timeout, prefix="", do_format=True,
     return section
 
 
-def write_result(case_id, name, sandbox_id, sections, total_elapsed, status="ok"):
+def write_result(case_id, name, sandbox_id, sections, total_elapsed, status="ok",
+                 started=None):
     path = os.path.join(batch_dir(), f"{case_id}-{name}.txt")
     with open(path, "w") as f:
         f.write(f"# case      : {case_id} {name}\n")
@@ -391,6 +392,11 @@ def write_result(case_id, name, sandbox_id, sections, total_elapsed, status="ok"
         f.write(f"# domain    : {DOMAIN or 'e2b.dev'}\n")
         f.write(f"# sandbox   : {sandbox_id}\n")
         f.write(f"# duration  : {DURATION}s/test\n")
+        # started/finished bracket the measurement window so the L1-side host
+        # observer (tests/perf/hostobs/observe.py) can cross-check, by time, the
+        # Firecracker-process samples it correlated to this case by sandbox id.
+        if started:
+            f.write(f"# started   : {started}\n")
         f.write(f"# finished  : {datetime.now(timezone.utc).isoformat()}\n")
         f.write(f"# total_s   : {total_elapsed}\n")
         for s in sections:
@@ -509,6 +515,7 @@ def run_case(case_id, name, commands, memory=False, requires_env=None,
     sections = []
     runs = []  # repeats x commands grid of sections, for aggregation
     start = time.time()
+    started_iso = datetime.now(timezone.utc).isoformat()
     try:
         # Optional one-shot root setup hook (e.g. remount noatime / tune sysfs),
         # applied to this fresh sandbox before any measurement. Recorded so we
@@ -558,7 +565,8 @@ def run_case(case_id, name, commands, memory=False, requires_env=None,
     status = "ok" if not fails else f"completed-with-errors (exits {fails})"
     agg = aggregate_runs(commands, runs) if repeats > 1 else []
     health = health_section(sections)  # per-run steal/iowait/cs verdict
-    path = write_result(case_id, name, sandbox_id, sections + agg + health, total, status=status)
+    path = write_result(case_id, name, sandbox_id, sections + agg + health, total,
+                        status=status, started=started_iso)
     print(f"[{case_id}] {name}: done in {total}s "
           f"({'OK' if not fails else 'FAILED ' + str(fails)}) -> {os.path.basename(path)}")
     # Surface failures via exit code so run_all.py (and CI) see a real non-zero rc.
