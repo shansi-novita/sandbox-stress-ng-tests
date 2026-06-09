@@ -242,6 +242,7 @@ class Capture:
         self.start_iso = now_iso()
         self.start_mono = time.monotonic()
         self.vm_dir = kvm_vm_dir(pid)
+        self.kvm_source = ("per-vm:" + self.vm_dir) if self.vm_dir else "global-aggregate"
         self.kvm0 = kvm_counters(self.vm_dir)
         self.cpu0 = proc_cpu_jiffies(pid)
         self.vol0, self.nonvol0 = proc_ctxt(pid)
@@ -329,7 +330,7 @@ class Capture:
             "started": self.start_iso,
             "finished": end_iso,
             "lifetime_s": dur,
-            "kvm_source": ("per-vm:" + self.vm_dir) if self.vm_dir else "global-aggregate",
+            "kvm_source": self.kvm_source,
             "vm_exits": kvm_delta,
             "fc_host_cpu_s": round(fc_cpu_jiff / CLK_TCK, 3) if fc_cpu_jiff is not None else None,
             "fc_vcpu_cpu_s": round(vcpu / CLK_TCK, 3) if vcpu is not None else None,
