@@ -44,8 +44,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# Curated KVM debugfs counters worth diffing. Missing ones are simply skipped, so
-# this list is a superset across kernels/arches (Intel vs AMD names differ a bit).
+# Curated subset used ONLY for the global-aggregate fallback (no per-VM dir). The
+# normal per-VM path captures every single-int counter, so it needs no list. Names
+# differ across arches (Intel vs AMD); missing ones are simply skipped.
 KVM_COUNTERS = [
     "exits", "halt_exits", "mmio_exits", "io_exits", "signal_exits",
     "irq_exits", "irq_window_exits", "nmi_window_exits", "request_irq_exits",
@@ -132,25 +133,62 @@ def vcpu_thread_cpu(pid):
     return (vcpu, other) if found else (None, None)
 
 
+def _read_single_int(path):
+    """Value of a debugfs counter, but ONLY if it is a lone integer (skips the
+    *_hist histogram files, which hold many numbers)."""
+    try:
+        with open(path) as f:
+            toks = f.read().split()
+        if len(toks) == 1:
+            return int(toks[0])
+    except Exception:
+        pass
+    return None
+
+
 def kvm_vm_dir(pid):
-    """Per-VM debugfs dir for this pid, e.g. /sys/kernel/debug/kvm/<pid>-<fd>."""
-    for d in glob.glob(f"{KVM_DEBUGFS}/{pid}-*"):
-        if os.path.isdir(d):
+    """Per-VM debugfs dir for this process, e.g. /sys/kernel/debug/kvm/<id>-<fd>.
+
+    The dir is named by the task that called KVM_CREATE_VM — usually the main pid,
+    but it can be any thread of the Firecracker process. Match on the pid OR any of
+    its tids so we never wrongly fall back to the (multi-VM) global aggregate.
+    """
+    ids = {pid}
+    try:
+        ids |= {int(os.path.basename(t)) for t in glob.glob(f"/proc/{pid}/task/*")}
+    except Exception:
+        pass
+    for d in glob.glob(f"{KVM_DEBUGFS}/*-*"):
+        base = os.path.basename(d).split("-")[0]
+        if base.isdigit() and int(base) in ids and os.path.isdir(d):
             return d
     return None
 
 
 def kvm_counters(vm_dir):
-    """Snapshot KVM counters from a per-VM dir (standard Ubuntu), or — only as a
-    labeled degraded fallback when no per-VM dir exists — the global aggregate."""
+    """Snapshot KVM exit counters.
+
+    From a per-VM dir (standard Ubuntu) capture EVERY single-integer counter, so the
+    set is arch-agnostic (AMD/SVM and Intel/VMX expose different names — e.g. AMD has
+    no nmi_window_exits). Only as a labeled degraded fallback (no per-VM dir found)
+    read the curated subset from the global aggregate.
+    """
     base = vm_dir or KVM_DEBUGFS
     if not os.path.isdir(base):
         return None
     snap = {}
-    for c in KVM_COUNTERS:
-        v = read_int(os.path.join(base, c))
-        if v is not None:
-            snap[c] = v
+    if vm_dir:
+        for name in os.listdir(base):
+            p = os.path.join(base, name)
+            if os.path.isfile(p):
+                v = _read_single_int(p)
+                if v is not None:
+                    snap[name] = v
+    else:
+        for c in KVM_COUNTERS:
+            v = _read_single_int(os.path.join(base, c))
+            if v is not None:
+                snap[c] = v
     return snap or None
 
 

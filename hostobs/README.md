@@ -56,9 +56,11 @@ python3 tests/perf/hostobs/analyze.py \
 
 - **表 2(指纹)**是核心:`cpu` 组(A1/A2/A3 纯用户态、几乎不陷出)loss% 应≈0,作为"无虚拟化代价"基准;`exit`/`io`/`fs` 组 loss% 显著、且**表 1 对应高 VM-exit 次数 / 高 FC 宿主 CPU** → 开销由 VM-exit 处理主导,正是嵌套放大的部位。
 - **表 3(估计)**:exit/io/fs 组 loss% 减去公开裸机 Firecracker 参考带 = 嵌套增量**估计**(非测量,基准带是粗略公开值)。
-- `observe.py` 的 `perf_kvm.reasons` 看 exit 原因构成:`EPT_VIOLATION`(内存)/`EXTERNAL_INTERRUPT`(中断)/`IO_INSTRUCTION`(I/O)占比高 = 嵌套代价集中处;`l1_steal_pct` 升高 = L0 在二次抢占 L1。
+- `observe.py` 的 `perf_kvm.reasons` 看 exit 原因构成:`EPT_VIOLATION`/`NPF`(内存)/`EXTERNAL_INTERRUPT`(中断)/`IO_INSTRUCTION`(I/O)占比高 = 嵌套代价集中处;`l1_steal_pct` 升高 = L0 在二次抢占 L1。
+- **看 `characterize.sh` 里的 `avic`(AMD)/ `enable_apicv`(Intel)**:若为 `N`(实测 AMD EPYC 节点即为 `avic=N`),硬件虚拟中断投递关闭,中断 / IPI / I/O 完成走软件模拟,**嵌套下被放大** → 重点观察 B7 epoll、A7 tlb-IPI、A8–A12 存储 这几个用例的 loss% 与 `irq_exits`/`io_exits`。`npt`/`ept=Y` 则内存路径硬件加速,内存类陷出代价可控。
 
 ## 依赖
 
 - L1:`perf`(可选,深采用;`apt install linux-tools-$(uname -r)`)、KVM debugfs(标准 Ubuntu 默认挂在 `/sys/kernel/debug/kvm/`,运行中 VM 会出现 `<pid>-<fd>/` 子目录)、root。
+- `perf_event_paranoid` 即使为 `4`(很严格)也无妨:**root 绕过该限制**,observe.py 以 sudo 运行即可正常 `perf kvm stat`。
 - `observe.py` / `analyze.py` 仅用 Python 标准库,无需第三方包。
