@@ -9,7 +9,7 @@ if __name__ == "__main__":
     # ourselves with the gcc that's already in the image, in /tmp (always writable
     # and the cwd lat_proc sees), so exec/shell measure real fork+execve / fork+sh.
     run_case("B2", "proc-create", [
-        'cd /tmp && printf "int main(){return 0;}" > h.c '
+        'cd /tmp && printf "int main(){{return 0;}}" > h.c '
         '&& cc -o hello h.c 2>/dev/null || printf "#!/bin/sh\\nexit 0\\n" > hello; '
         'chmod +x hello; '
         'for k in fork exec shell; do echo "=== $k ==="; lat_proc $k; done; '

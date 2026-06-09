@@ -35,6 +35,13 @@ DURATION = int(os.environ.get("DURATION", "30"))
 WARMUP_FRACTION = float(os.environ.get("WARMUP_FRACTION", "0.85"))
 STORAGE_DIR = os.environ.get("STORAGE_DIR", "/tmp/perf-io")
 STREAM = os.environ.get("STREAM", "1") != "0"  # live-stream output to terminal
+# Optional shell command run ONCE as root in each fresh sandbox (or the local
+# container) BEFORE the case commands — for tuning the environment, e.g.
+#   SANDBOX_HOOK='mount -o remount,noatime /'
+#   SANDBOX_HOOK='DEV=$(basename $(findmnt -no SOURCE /)); echo 64 > /sys/fs/ext4/$DEV/inode_readahead_blks'
+# Recorded as a [hook] section; its exit code counts toward the case status so a
+# failed tuning step is visible. Empty = disabled. NOT placeholder-substituted.
+HOOK = os.environ.get("SANDBOX_HOOK", "").strip()
 
 # e2b.dev rejects Sandbox.create timeouts greater than 1 hour; cap the computed
 # sandbox lifetime so long cases (e.g. B10 UnixBench) still start instead of 400ing.
@@ -82,13 +89,16 @@ def make_sandbox(timeout):
     return Sandbox.create(TEMPLATE, **kwargs)
 
 
-def run_cmd(sbx, cmd, cmd_timeout, prefix=""):
+def run_cmd(sbx, cmd, cmd_timeout, prefix="", user=None, do_format=True):
     """Run one command, returning a section dict with full raw output.
 
     When STREAM is on, output is echoed to the terminal live via SDK callbacks
-    while also being buffered for the result file.
+    while also being buffered for the result file. user="root" runs it as root
+    (needed by the setup hook: remount / sysfs writes). do_format=False skips
+    placeholder substitution for literal shell (e.g. the hook's $DEV / ${VAR}).
     """
-    cmd = cmd.format(**SUBST)
+    if do_format:
+        cmd = cmd.format(**SUBST)
     if STREAM:
         print(f"\n>>> {prefix} $ {cmd}", flush=True)
     out_buf, err_buf = [], []
@@ -105,7 +115,10 @@ def run_cmd(sbx, cmd, cmd_timeout, prefix=""):
 
     start = time.time()
     try:
-        res = sbx.commands.run(cmd, timeout=cmd_timeout, on_stdout=on_out, on_stderr=on_err)
+        kwargs = {"timeout": cmd_timeout, "on_stdout": on_out, "on_stderr": on_err}
+        if user:
+            kwargs["user"] = user
+        res = sbx.commands.run(cmd, **kwargs)
         exit_code = res.exit_code
     except Exception as e:  # command error/timeout: capture what streamed, don't abort
         exit_code = -1
@@ -122,14 +135,15 @@ def run_cmd(sbx, cmd, cmd_timeout, prefix=""):
     }
 
 
-def run_cmd_local(cmd, cmd_timeout, prefix=""):
+def run_cmd_local(cmd, cmd_timeout, prefix="", do_format=True):
     """Run one command locally via bash (BACKEND=local, inside the host container).
 
     stderr is merged into stdout so the live stream and captured buffer keep
     output ordering. A watchdog timer enforces cmd_timeout even if the command
     hangs while producing no output. Mirrors run_cmd's return shape.
     """
-    cmd = cmd.format(**SUBST)
+    if do_format:
+        cmd = cmd.format(**SUBST)
     if STREAM:
         print(f"\n>>> {prefix} $ {cmd}", flush=True)
     buf = []
@@ -285,6 +299,16 @@ def run_case(case_id, name, commands, memory=False, requires_env=None,
     runs = []  # repeats x commands grid of sections, for aggregation
     start = time.time()
     try:
+        # Optional one-shot root setup hook (e.g. remount noatime / tune sysfs),
+        # applied to this fresh sandbox before any measurement. Recorded so we
+        # can confirm it took effect; its exit feeds into the case status.
+        if HOOK:
+            if BACKEND == "local":
+                h = run_cmd_local(HOOK, 60, f"{case_id} [hook]", do_format=False)
+            else:
+                h = run_cmd(sbx, HOOK, 60, f"{case_id} [hook]", user="root", do_format=False)
+            h["phase"] = "hook"
+            sections.append(h)
         if memory:
             for c in commands:                       # 1. cold (first access, uffd)
                 s = exec_one(c, cmd_timeout, f"{case_id} [cold]"); s["phase"] = "cold"; sections.append(s)
