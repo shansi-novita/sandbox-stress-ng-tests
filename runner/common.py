@@ -48,6 +48,20 @@ PIN_CORE = os.environ.get("PIN_CORE", "1")
 # failed tuning step is visible. Empty = disabled. NOT placeholder-substituted.
 HOOK = os.environ.get("SANDBOX_HOOK", "").strip()
 
+# --- perf tracing of stress-ng (opt-in, both backends) ----------------------
+# When PERF_TRACE is on, every measured command matching PERF_MATCH is run UNDER
+# perf instead of the /usr/bin/time health wrapper (in-place replacement), to get
+# a perf stat counter summary and a perf report hotspot table into the result.
+# Firecracker guests / most cloud VMs expose NO hardware PMU, so sampling defaults
+# to the software event cpu-clock (works without a vPMU); hardware perf-stat events
+# will show "<not supported>", which itself confirms the missing vPMU.
+PERF_TRACE = os.environ.get("PERF_TRACE", "0") != "0"
+PERF_MATCH = os.environ.get("PERF_MATCH", "stress-ng")  # regex; which cmds to trace
+PERF_MODE = os.environ.get("PERF_MODE", "both")          # both | stat | record
+PERF_EVENT = os.environ.get("PERF_EVENT", "cpu-clock")   # record sampling event
+PERF_FREQ = os.environ.get("PERF_FREQ", "999")           # record sampling frequency
+PERF_REPORT_LINES = os.environ.get("PERF_REPORT_LINES", "40")  # hotspot table cap
+
 # e2b.dev rejects Sandbox.create timeouts greater than 1 hour; cap the computed
 # sandbox lifetime so long cases (e.g. B10 UnixBench) still start instead of 400ing.
 SANDBOX_MAX_TIMEOUT = 3600
@@ -149,6 +163,52 @@ def _measure_wrapper(cmd, pin_core):
         "rm -f $__B.sh $__B.0 $__B.1 $__B.t 2>/dev/null\n"
         "exit $__RC\n"
     )
+
+
+def perf_wrapper(cmd, pin_core):
+    """Wrap cmd to run UNDER perf (stat + record→report) for hotspot/perf analysis.
+
+    Replaces the health wrapper for stress-ng runs (PERF_TRACE). The command goes
+    verbatim into a temp script via a quoted heredoc (no re-quoting). We best-effort
+    relax perf_event_paranoid/kptr_restrict (needs root; harmless otherwise) so the
+    kernel side — where the virtualization/trap cost lives — resolves to symbols.
+    Sampling uses PERF_EVENT (default cpu-clock) so it works with no hardware PMU.
+    The section exit code is the benchmark's own rc, not perf's, so case status
+    still reflects whether stress-ng succeeded. Output (stat summary + hotspot top)
+    goes to stdout between clear markers.
+    """
+    pin = f"taskset -c {pin_core} " if pin_core is not None else ""
+    do_stat = PERF_MODE in ("both", "stat")
+    do_record = PERF_MODE in ("both", "record")
+    lines = []
+    lines.append("echo -1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true")
+    lines.append("echo 0 > /proc/sys/kernel/kptr_restrict 2>/dev/null || true")
+    lines.append("__B=/tmp/.e2bperf.$$")
+    lines.append("cat > $__B.sh <<'__E2B_PERF_CMD_EOF__'")
+    lines.append(cmd)
+    lines.append("__E2B_PERF_CMD_EOF__")
+    lines.append("__P=$(command -v perf || echo perf)")
+    lines.append("__RC=0")
+    lines.append(f'echo "### perf-traced (mode={PERF_MODE} event={PERF_EVENT}) '
+                 '— timing/health below is perturbed by perf sampling ###"')
+    if do_stat:
+        lines.append('echo "=== perf stat ==="')
+        lines.append(f'{pin}"$__P" stat -o $__B.stat -- bash $__B.sh; __RC=$?')
+        lines.append("cat $__B.stat 2>/dev/null")
+    if do_record:
+        lines.append('echo "=== perf report (hotspots) ==="')
+        lines.append(
+            f'{pin}"$__P" record -e {PERF_EVENT} -F {PERF_FREQ} -g -o $__B.data '
+            "-- bash $__B.sh >/dev/null 2>&1; __RC2=$?")
+        if not do_stat:  # record's rc is the only signal of the benchmark result
+            lines.append("__RC=$__RC2")
+        lines.append(
+            f'"$__P" report --stdio --percent-limit 1 -i $__B.data 2>/dev/null '
+            f"| head -n {PERF_REPORT_LINES} "
+            '|| echo "(perf report unavailable — check perf permissions / event support)"')
+    lines.append("rm -f $__B.sh $__B.stat $__B.data 2>/dev/null")
+    lines.append("exit $__RC")
+    return "\n".join(lines) + "\n"
 
 
 def _last_int(line):
@@ -262,7 +322,16 @@ def run_cmd(sbx, cmd, cmd_timeout, prefix="", user=None, do_format=True,
         cmd = cmd.format(**SUBST)
     if STREAM:
         print(f"\n>>> {prefix} $ {cmd}", flush=True)
-    run = _measure_wrapper(cmd, pin_core) if measure else cmd
+    # perf tracing replaces the health wrapper for matched (stress-ng) commands.
+    use_perf = measure and PERF_TRACE and re.search(PERF_MATCH, cmd) is not None
+    if use_perf:
+        run = perf_wrapper(cmd, pin_core)
+        if not user:  # perf needs root to bypass a strict perf_event_paranoid
+            user = "root"
+    elif measure:
+        run = _measure_wrapper(cmd, pin_core)
+    else:
+        run = cmd
     out_buf, err_buf = [], []
 
     def on_out(d):
@@ -303,7 +372,7 @@ def run_cmd(sbx, cmd, cmd_timeout, prefix="", user=None, do_format=True,
             sys.stderr.write(msg); sys.stderr.flush()
     stderr_text = "".join(err_buf)
     health = None
-    if measure:  # the health block rides on stderr; slice it back out
+    if measure and not use_perf:  # the health block rides on stderr; slice it back out
         stderr_text, health = _extract_health(stderr_text)
         if STREAM and health:
             print(f">>> {prefix} health: {_fmt_health(health)}", flush=True)
@@ -333,7 +402,16 @@ def run_cmd_local(cmd, cmd_timeout, prefix="", do_format=True,
         cmd = cmd.format(**SUBST)
     if STREAM:
         print(f"\n>>> {prefix} $ {cmd}", flush=True)
-    run = _measure_wrapper(cmd, pin_core) if measure else cmd
+    # perf tracing replaces the health wrapper for matched (stress-ng) commands.
+    # The container already runs as root; perf permissions come from run-host.sh
+    # adding --cap-add SYS_ADMIN/PERFMON when PERF_TRACE is on.
+    use_perf = measure and PERF_TRACE and re.search(PERF_MATCH, cmd) is not None
+    if use_perf:
+        run = perf_wrapper(cmd, pin_core)
+    elif measure:
+        run = _measure_wrapper(cmd, pin_core)
+    else:
+        run = cmd
     buf = []
     timed_out = {"v": False}
     start = time.time()
@@ -366,7 +444,7 @@ def run_cmd_local(cmd, cmd_timeout, prefix="", do_format=True,
         buf.append(f"\n{type(e).__name__}: {e}")
     stdout_text = "".join(buf)
     health = None
-    if measure:  # stderr is merged into stdout here, so the block is in stdout
+    if measure and not use_perf:  # stderr is merged into stdout here, so block is in stdout
         stdout_text, health = _extract_health(stdout_text)
         if STREAM and health:
             print(f">>> {prefix} health: {_fmt_health(health)}", flush=True)
