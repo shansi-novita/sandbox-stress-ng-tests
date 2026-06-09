@@ -5,4 +5,4 @@ from common import run_case
 if __name__ == "__main__":
     run_case("B6", "ipc-futex", [
         "stress-ng --temp-path /tmp --futex 1 -t {duration} --metrics-brief",
-    ])
+    ], repeats=3)

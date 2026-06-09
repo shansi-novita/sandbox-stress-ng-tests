@@ -5,4 +5,4 @@ from common import run_case
 if __name__ == "__main__":
     run_case("B7", "ipc-epoll", [
         "stress-ng --temp-path /tmp --epoll 1 -t {duration} --metrics-brief",
-    ])
+    ], repeats=3)
