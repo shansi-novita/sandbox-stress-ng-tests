@@ -1,0 +1,19 @@
+# Host-baseline image: identical tools to the e2b template, but runs the perf
+# suite locally on container start (BACKEND=local) instead of dropping to a shell.
+# Build the base image first (same build context, tests/perf):
+#   docker build -t perf-bench -f Dockerfile .
+# Then this one is built/launched by run-host.sh.
+FROM perf-bench
+
+# local backend = run commands via subprocess (no e2b SDK / no sandbox).
+# Disk uses host /tmp (bind-mounted by run-host.sh); logs to /tmp/result/<batch>.
+ENV BACKEND=local \
+    STREAM=1 \
+    RESULTS_ROOT=/tmp/result \
+    STORAGE_DIR=/tmp/perf-io \
+    DURATION=30
+
+COPY runner/ /test/runner/
+
+WORKDIR /test
+CMD ["python3", "/test/runner/run_all.py"]
