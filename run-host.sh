@@ -30,9 +30,12 @@ echo "==> running host baseline: ${CPUS} vCPU / ${MEM_MB} MiB, duration=${DURATI
 # --memory + equal --memory-swap caps RAM and disables swap.
 # -v /tmp:/tmp gives the container the host disk for storage tests AND lands
 #   results in host /tmp/result in one mount.
+# --tmpfs /mnt/tmpfsbench gives the tmpfs cases (C12/C17) a tmpfs path without a
+#   privileged container; the sandbox mounts the same path itself at run time.
 docker run --rm \
   --cpuset-cpus="0-$((CPUS - 1))" \
   --memory="${MEM_MB}m" --memory-swap="${MEM_MB}m" \
+  --tmpfs /mnt/tmpfsbench:rw,size=1g \
   -v /tmp:/tmp \
   -e DURATION="${DURATION}" \
   -e SANDBOX_CPUS="${CPUS}" -e SANDBOX_MEM_MB="${MEM_MB}" \
