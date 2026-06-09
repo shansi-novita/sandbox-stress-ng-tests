@@ -29,9 +29,11 @@
 # 0) L1 上 root,先存档环境画像
 sudo bash tests/perf/hostobs/characterize.sh /tmp/L1-characterize.txt
 
-# 1) L1 上 root,启动观测器(批次开始前先起);深采加 HOSTOBS_PERF=1
-sudo HOSTOBS_PERF=1 HOSTOBS_DIR=/tmp/hostobs-$(date +%s) \
-     python3 tests/perf/hostobs/observe.py
+# 1) L1 上 root,启动观测器(批次开始前先起)
+#    默认已开 perf 深采(HOSTOBS_PERF=1)、输出到 /tmp/hostobs-<时间戳>
+sudo python3 tests/perf/hostobs/observe.py
+#    跳过 perf:  sudo HOSTOBS_PERF=0 python3 tests/perf/hostobs/observe.py
+#    自定目录:  sudo HOSTOBS_DIR=/tmp/myobs python3 tests/perf/hostobs/observe.py
 #    它会忽略启动时已存在的沙箱,只采测试期间新出现的;批次跑完后 Ctrl-C
 
 # 2) 能访问部署的机器上,跑 L2(沙箱)批次(沿用现状:绑核 PIN_CORE=1)

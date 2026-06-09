@@ -26,10 +26,13 @@ runner writes the same id into each result header as `# sandbox`, so analyze.py
 joins host samples to cases exactly, not by guessing order.
 
 Output: one JSON per sandbox at  <out_dir>/<sandboxID>.json  (default out_dir is
-$HOSTOBS_DIR or ./hostobs-out/<timestamp>). Everything is read-only sampling.
+$HOSTOBS_DIR or /tmp/hostobs-<timestamp>). Everything is read-only sampling.
+
+Defaults: perf kvm stat ON (HOSTOBS_PERF=1), out dir /tmp/hostobs-<ts>.
 
 Usage:
-  sudo HOSTOBS_PERF=1 python3 observe.py [--out DIR] [--poll 0.5]
+  sudo python3 observe.py                 # uses the defaults above
+  sudo HOSTOBS_PERF=0 python3 observe.py  # skip perf (e.g. perf not installed)
   (start it BEFORE the batch; Ctrl-C to stop after the batch finishes)
 """
 
@@ -192,19 +195,26 @@ def kvm_counters(vm_dir):
     return snap or None
 
 
+def read_cgroup_stat(path):
+    """Read one cgroup v2 cpu.stat file into a dict (with _path)."""
+    try:
+        out = {}
+        with open(path) as f:
+            for line in f:
+                k, _, v = line.partition(" ")
+                out[k] = int(v)
+        out["_path"] = path
+        return out
+    except Exception:
+        return None
+
+
 def cgroup_cpu_stat(sandbox_id):
     """Find a cgroup v2 cpu.stat whose path mentions this sandbox id; return dict."""
     for path in glob.glob(f"/sys/fs/cgroup/**/*{sandbox_id}*/cpu.stat", recursive=True):
-        try:
-            out = {}
-            with open(path) as f:
-                for line in f:
-                    k, _, v = line.partition(" ")
-                    out[k] = int(v)
-            out["_path"] = path
-            return out
-        except Exception:
-            continue
+        cg = read_cgroup_stat(path)
+        if cg:
+            return cg
     return None
 
 
@@ -233,7 +243,14 @@ def list_fc():
 
 # --- per-sandbox capture ----------------------------------------------------
 class Capture:
-    """Start/end snapshots for one Firecracker process, plus optional perf."""
+    """Rolling snapshots for one Firecracker process, plus optional perf.
+
+    The per-VM KVM debugfs dir, /proc/<pid>, and the cgroup all VANISH the instant
+    the Firecracker process exits — which is exactly when we detect "gone" and would
+    take an end snapshot. So instead we sample() every poll WHILE alive and keep the
+    latest successful reading; finalize() diffs that against the start snapshot. The
+    captured window is [start, last live sample], i.e. up to one poll short of exit.
+    """
 
     def __init__(self, sandbox_id, pid, use_perf, out_dir):
         self.sid = sandbox_id
@@ -243,14 +260,58 @@ class Capture:
         self.start_mono = time.monotonic()
         self.vm_dir = kvm_vm_dir(pid)
         self.kvm_source = ("per-vm:" + self.vm_dir) if self.vm_dir else "global-aggregate"
+        # start snapshots
         self.kvm0 = kvm_counters(self.vm_dir)
         self.cpu0 = proc_cpu_jiffies(pid)
         self.vol0, self.nonvol0 = proc_ctxt(pid)
         self.steal0, self.total0 = l1_steal_total()
+        # rolling "last live" snapshots, seeded with the start values
+        self.kvm1 = self.kvm0
+        self.cpu1 = self.cpu0
+        self.vol1, self.nonvol1 = self.vol0, self.nonvol0
+        self.steal1, self.total1 = self.steal0, self.total0
+        self.vcpu = self.other = None
+        self.cgroup = None
+        self.cgroup_path = None
+        self.last_mono = self.start_mono
         self.perf_proc = None
         self.perf_data = None
         if use_perf:
             self._start_perf()
+
+    def sample(self):
+        """Refresh the 'last live' readings; call once per poll while pid is alive.
+        Only overwrite a field when the read succeeds, so the final pre-exit value
+        survives even if a later poll races the process teardown."""
+        k = kvm_counters(self.vm_dir)
+        if k:
+            self.kvm1 = k
+        c = proc_cpu_jiffies(self.pid)
+        if c is not None:
+            self.cpu1 = c
+        v, nv = proc_ctxt(self.pid)
+        if v is not None:
+            self.vol1, self.nonvol1 = v, nv
+        s, t = l1_steal_total()
+        if s is not None:
+            self.steal1, self.total1 = s, t
+        vcpu, other = vcpu_thread_cpu(self.pid)
+        if vcpu is not None:
+            self.vcpu, self.other = vcpu, other
+        cg = self._read_cgroup()
+        if cg:
+            self.cgroup = cg
+        self.last_mono = time.monotonic()
+
+    def _read_cgroup(self):
+        """cgroup cpu.stat for this sandbox; discover the path once, then re-read it
+        cheaply (avoids a recursive /sys/fs/cgroup glob on every poll)."""
+        if self.cgroup_path is None:
+            cg = cgroup_cpu_stat(self.sid)  # one-time recursive search
+            if cg:
+                self.cgroup_path = cg.get("_path")
+            return cg
+        return read_cgroup_stat(self.cgroup_path)
 
     def _start_perf(self):
         self.perf_data = os.path.join(self.out_dir, f".perf-{self.sid}.data")
@@ -276,12 +337,17 @@ class Capture:
                     self.perf_proc.kill()
         except Exception:
             pass
-        # Parse the reason histogram from `perf kvm stat report`.
+        # Parse the reason histogram from `perf kvm stat report`. Keep stderr on
+        # empty output so a misfire (no samples / unsupported) is diagnosable.
         try:
             rep = subprocess.run(["perf", "kvm", "stat", "report", "-i", self.perf_data],
                                  capture_output=True, text=True, timeout=60)
             reasons = self._parse_perf_report(rep.stdout)
-            return {"raw": rep.stdout, "reasons": reasons}
+            out = {"reasons": reasons}
+            if not reasons:  # surface why it was empty
+                out["raw"] = rep.stdout
+                out["stderr"] = (rep.stderr or "").strip()[:2000]
+            return out
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
         finally:
@@ -304,41 +370,45 @@ class Capture:
 
     def finalize(self):
         end_iso = now_iso()
+        # One last sample attempt in case the process is somehow still alive.
+        if os.path.isdir(f"/proc/{self.pid}"):
+            self.sample()
         dur = round(time.monotonic() - self.start_mono, 2)
-        kvm1 = kvm_counters(self.vm_dir or kvm_vm_dir(self.pid))
-        cpu1 = proc_cpu_jiffies(self.pid)
-        vol1, nonvol1 = proc_ctxt(self.pid)
-        steal1, total1 = l1_steal_total()
-        vcpu, other = vcpu_thread_cpu(self.pid)  # best-effort; may be gone already
+        win = round(self.last_mono - self.start_mono, 2)  # window the deltas cover
 
         def delta(a, b):
             return (b - a) if (a is not None and b is not None) else None
 
+        # Deltas use the rolling "last live" snapshots (self.*1), NOT a fresh read —
+        # by now /proc/<pid>, the per-VM debugfs dir and the cgroup are all gone.
         kvm_delta = None
-        if self.kvm0 and kvm1:
-            kvm_delta = {k: kvm1[k] - self.kvm0[k]
-                         for k in self.kvm0 if k in kvm1}
+        if self.kvm0 and self.kvm1:
+            kvm_delta = {k: self.kvm1[k] - self.kvm0[k]
+                         for k in self.kvm0 if k in self.kvm1}
 
         steal_pct = None
-        if None not in (self.steal0, steal1, self.total0, total1) and total1 > self.total0:
-            steal_pct = round(100.0 * (steal1 - self.steal0) / (total1 - self.total0), 3)
+        if (None not in (self.steal0, self.steal1, self.total0, self.total1)
+                and self.total1 > self.total0):
+            steal_pct = round(100.0 * (self.steal1 - self.steal0)
+                              / (self.total1 - self.total0), 3)
 
-        fc_cpu_jiff = delta(self.cpu0, cpu1)
+        fc_cpu_jiff = delta(self.cpu0, self.cpu1)
         rec = {
             "sandbox_id": self.sid,
             "pid": self.pid,
             "started": self.start_iso,
             "finished": end_iso,
             "lifetime_s": dur,
+            "sampled_window_s": win,
             "kvm_source": self.kvm_source,
             "vm_exits": kvm_delta,
             "fc_host_cpu_s": round(fc_cpu_jiff / CLK_TCK, 3) if fc_cpu_jiff is not None else None,
-            "fc_vcpu_cpu_s": round(vcpu / CLK_TCK, 3) if vcpu is not None else None,
-            "fc_other_cpu_s": round(other / CLK_TCK, 3) if other is not None else None,
-            "fc_ctxt_voluntary": delta(self.vol0, vol1),
-            "fc_ctxt_nonvoluntary": delta(self.nonvol0, nonvol1),
+            "fc_vcpu_cpu_s": round(self.vcpu / CLK_TCK, 3) if self.vcpu is not None else None,
+            "fc_other_cpu_s": round(self.other / CLK_TCK, 3) if self.other is not None else None,
+            "fc_ctxt_voluntary": delta(self.vol0, self.vol1),
+            "fc_ctxt_nonvoluntary": delta(self.nonvol0, self.nonvol1),
             "l1_steal_pct": steal_pct,
-            "cgroup_cpu_stat": cgroup_cpu_stat(self.sid),
+            "cgroup_cpu_stat": self.cgroup,
         }
         perf = self._stop_perf()
         if perf is not None:
@@ -349,13 +419,15 @@ class Capture:
 def main():
     ap = argparse.ArgumentParser(description="L1-side Firecracker/VM-exit observer")
     ap.add_argument("--out", default=os.environ.get("HOSTOBS_DIR"),
-                    help="output dir (default $HOSTOBS_DIR or ./hostobs-out/<ts>)")
+                    help="output dir (default $HOSTOBS_DIR or /tmp/hostobs-<ts>)")
     ap.add_argument("--poll", type=float, default=float(os.environ.get("HOSTOBS_POLL", "0.5")),
                     help="poll interval seconds (default 0.5)")
     args = ap.parse_args()
 
-    use_perf = os.environ.get("HOSTOBS_PERF", "0") == "1"
-    out_dir = args.out or os.path.join("hostobs-out", datetime.now().strftime("%Y%m%d-%H%M%S"))
+    # perf kvm stat (exit-reason histogram) is ON by default; set HOSTOBS_PERF=0 to
+    # skip it (e.g. perf not installed, or to avoid its L1-side tracepoint overhead).
+    use_perf = os.environ.get("HOSTOBS_PERF", "1") == "1"
+    out_dir = args.out or os.path.join("/tmp", "hostobs-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
     os.makedirs(out_dir, exist_ok=True)
 
     if os.geteuid() != 0:
@@ -391,6 +463,11 @@ def main():
                 active[sid] = Capture(sid, pid, use_perf, out_dir)
                 print(f"[observe] + {sid} pid={pid} "
                       f"({active[sid].kvm_source.split(':')[0]})", flush=True)
+            # Refresh rolling snapshots for every live capture (must happen BEFORE
+            # the process exits, or the per-VM debugfs dir / proc / cgroup are gone).
+            for sid, cap in active.items():
+                if sid in current:
+                    cap.sample()
             # Disappeared sandboxes -> finalize + write JSON.
             for sid in [s for s in active if s not in current]:
                 rec = active.pop(sid).finalize()
