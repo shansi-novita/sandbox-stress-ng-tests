@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: file (dentry) create/remove
     run_case("B14", "fs-dentry", [
-        "stress-ng --temp-path /tmp --dentry 1 --metrics-brief --no-rand-seed -t 15",
-    ])
+        "stress-ng --temp-path / --dentry 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

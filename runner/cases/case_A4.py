@@ -13,4 +13,4 @@ if __name__ == "__main__":
         'for t in $(printf "%s\\n" 1 2 $(($(nproc)/2)) $(nproc) $(($(nproc)*2)) | sort -un); do echo "=== threads=$t ==="; '
         'sysbench cpu --cpu-max-prime=20000 --threads=$t --time={duration} run '
         '| grep -E "events per second"; done',
-    ], cmd_timeout=DURATION * 6 + 120)
+    ], cmd_timeout=DURATION * 6 + 120, pin=False)  # thread-scaling sweep needs all cores

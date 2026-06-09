@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: chmod
     run_case("B16", "fs-chmod", [
-        "stress-ng --temp-path /tmp --chmod 1 --metrics-brief --no-rand-seed -t 10",
-    ])
+        "stress-ng --temp-path / --chmod 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

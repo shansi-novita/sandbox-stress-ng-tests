@@ -7,4 +7,4 @@ if __name__ == "__main__":
         "mkdir -p {storage_dir}; "
         "fio --directory={storage_dir} --name=fsync --rw=write --bs=4k --fsync=1 "
         "--size=512M --numjobs=1 --runtime={duration} --time_based=1 --group_reporting=1",
-    ])
+    ], user="root")

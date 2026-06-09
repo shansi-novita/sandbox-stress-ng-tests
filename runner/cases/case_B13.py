@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: symlink create/remove
     run_case("B13", "fs-symlink", [
-        "stress-ng --temp-path /tmp --symlink 1 --metrics-brief --no-rand-seed -t 15",
-    ])
+        "stress-ng --temp-path / --symlink 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

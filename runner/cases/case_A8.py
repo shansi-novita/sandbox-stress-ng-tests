@@ -9,4 +9,4 @@ if __name__ == "__main__":
     run_case("A8", "storage-seq", [
         "mkdir -p {storage_dir}; " + _FIO + " --name=seqread --rw=read --bs=1M",
         _FIO + " --name=seqwrite --rw=write --bs=1M",
-    ])
+    ], user="root")

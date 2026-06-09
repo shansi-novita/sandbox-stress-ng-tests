@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: utime (timestamp updates)
     run_case("B18", "fs-utime", [
-        "stress-ng --temp-path /tmp --utime 1 --metrics-brief --no-rand-seed -t 10",
-    ])
+        "stress-ng --temp-path / --utime 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

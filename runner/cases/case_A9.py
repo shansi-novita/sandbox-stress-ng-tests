@@ -8,4 +8,4 @@ if __name__ == "__main__":
         "fio --directory={storage_dir} --name=randrw --rw=randrw --bs=4k "
         "--iodepth=32 --ioengine=libaio --size=1G --direct=1 --numjobs=1 "
         "--runtime={duration} --time_based=1 --group_reporting=1",
-    ])
+    ], user="root")

@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: chown
     run_case("B17", "fs-chown", [
-        "stress-ng --temp-path /tmp --chown 1 --metrics-brief --no-rand-seed -t 10",
-    ])
+        "stress-ng --temp-path / --chown 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

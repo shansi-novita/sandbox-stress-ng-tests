@@ -5,5 +5,5 @@ from common import run_case
 if __name__ == "__main__":
     # filesystem metadata: readdir (getdents)
     run_case("B19", "fs-getdent", [
-        "stress-ng --temp-path /tmp --getdent 1 --metrics-brief --no-rand-seed -t 10",
-    ])
+        "stress-ng --temp-path / --getdent 1 --metrics-brief --no-rand-seed -t {duration}",
+    ], user="root")

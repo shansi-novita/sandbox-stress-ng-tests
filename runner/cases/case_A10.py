@@ -11,4 +11,4 @@ if __name__ == "__main__":
         'start=$(date +%s.%N); tar xf $d/sf.tar -C $d/out; sync; end=$(date +%s.%N); '
         'echo "extract_seconds=$(echo "$end - $start" | bc)"; '
         'echo "files_per_s=$(echo "scale=0; 5000/($end - $start)" | bc)"; rm -rf $d',
-    ])
+    ], user="root")

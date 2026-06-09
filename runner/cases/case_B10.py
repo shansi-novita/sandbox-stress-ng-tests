@@ -16,4 +16,4 @@ if __name__ == "__main__":
     run_case("B10", "composite", [
         RUN + " -i 1 -c 1",
         RUN + " -i 1 -c $(nproc)",
-    ], cmd_timeout=900)
+    ], cmd_timeout=900, pin=False)  # UnixBench runs a multicore pass; do not pin

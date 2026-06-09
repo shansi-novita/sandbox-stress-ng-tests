@@ -5,4 +5,4 @@ from common import run_case
 if __name__ == "__main__":
     run_case("A7", "mem-tlb", [
         "stress-ng --temp-path /tmp --tlb-shootdown 1 -t {duration} --metrics-brief",
-    ])
+    ], pin=False)  # tlb-shootdown sends IPIs to OTHER cpus; pinning to one core defeats it
